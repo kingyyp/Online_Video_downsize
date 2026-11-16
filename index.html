@@ -497,7 +497,7 @@ function vParams() {
   let H, vb, ab, ch, warn = '', wfps = 0;
   if (wa) {
     ab = dur > 600 ? 32000 : dur > 300 ? 48000 : 80000; ch = ab <= 48000 ? 1 : 2;
-    vb = Math.min(2500000, Math.floor(15.5 * 8388608 * 0.96 / dur - ab));
+    vb = Math.min(2500000, Math.floor(15.5 * 8388608 * 0.9 / dur - ab));
     if (vb < 150000) warn = 'This video is very long, so WhatsApp quality will be low. Consider splitting it.';
     vb = Math.max(60000, vb);
     // Spend bits on fewer pixels/frames so each one looks cleaner
@@ -553,6 +553,10 @@ async function vCompressFast() {
       if (vInfo.fps > p.fps + 0.5) video.frameRate = p.fps;
       const audio = { codec: webm ? 'opus' : 'aac', numberOfChannels: p.ch, quality: new mb.Quality({ bitrate: p.ab }) };
       const trim = p.parts > 1 ? { start: i * p.seg, end: Math.min(vduration, (i + 1) * p.seg) } : undefined;
+      const LIMIT = 15.6 * 1048576;
+      let scale = 1, blob;
+      for (let attempt = 0; attempt < 4; attempt++) {
+      video.quality = new mb.Quality({ bitrate: Math.round(p.vb * scale), bitrateMode: attempt ? 'constant' : 'variable' });
       const variants = [
         [video, audio],
         [{ ...video, hardwareAcceleration: 'no-preference' }, audio],
@@ -573,11 +577,15 @@ async function vCompressFast() {
         $('vprog').value = all;
         const el = (performance.now() - t0) / 1000, speed = all > 0.01 ? all * vduration / el : 0;
         const eta = all > 0.01 ? Math.round(el * (1 - all) / all) : null;
-        status((p.parts > 1 ? `Part ${i + 1} of ${p.parts} · ` : '') + `Compressing… ${Math.round(all * 100)}%` + (speed ? ` · speed ${speed.toFixed(1)}x` : '') +
+        status((p.parts > 1 ? `Part ${i + 1} of ${p.parts} · ` : '') + (attempt ? `Re-encoding to fit 16 MB (try ${attempt + 1}) · ` : '') + `Compressing… ${Math.round(all * 100)}%` + (speed ? ` · speed ${speed.toFixed(1)}x` : '') +
           (eta !== null ? ` · ~${eta >= 60 ? Math.floor(eta / 60) + 'm ' : ''}${eta % 60}s left` : ''));
       };
       await conv.execute();
-      outs.push(new Blob([output.target.buffer], { type: webm ? 'video/webm' : 'video/mp4' }));
+      blob = new Blob([output.target.buffer], { type: webm ? 'video/webm' : 'video/mp4' });
+      if (!p.wa || blob.size <= LIMIT) break;
+      scale *= Math.max(0.5, Math.min(0.92, (LIMIT / blob.size) * 0.95));
+      }
+      outs.push(blob);
     }
     if (outs.length === 1) finishVideo(outs[0], ext);
     else await finishParts(outs, ext);
