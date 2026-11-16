@@ -41,7 +41,8 @@
       <div>Estimated output<b id="vOut">-</b><span id="vOutD"></span></div>
       <div id="vsav" class="good">Saved<b id="vSave">-</b></div>
     </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px">
+    <label style="font-weight:600"><input type="checkbox" id="vwa"> Optimize for WhatsApp <small>(MP4 H.264/AAC, max 720p, 30fps, fits under 16 MB)</small></label>
+    <div id="vopts" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px">
       <div><label>Resolution</label>
         <select id="vres"><option value="0">Original</option><option value="1080">1080p</option>
           <option value="720" selected>720p</option><option value="480">480p</option><option value="360">360p</option></select></div>
@@ -59,7 +60,8 @@
 
   <div id="app">
     <div class="panel">
-      <label>Size preset</label>
+      <label style="margin-top:0"><input type="checkbox" id="wa"> Optimize for WhatsApp <small>(JPEG, max 1600px)</small></label>
+      <div id="iopts"><label>Size preset</label>
       <select id="preset">
         <option value="100">Original (100%)</option>
         <option value="75">Large (75%)</option>
@@ -79,6 +81,7 @@
         <option value="image/webp">WebP</option>
         <option value="image/png">PNG (lossless, quality ignored)</option>
       </select>
+      </div>
       <button id="save" disabled>Save / Download</button>
     </div>
     <div class="panel">
@@ -128,6 +131,7 @@ function load(f) {
 }
 
 function targetWidth() {
+  if ($('wa').checked) return Math.min(img.naturalWidth, 1600);
   const p = $('preset').value;
   if (p === 'custom') return Math.max(1, Math.round(+$('width').value || img.naturalWidth));
   return Math.max(1, Math.round(img.naturalWidth * p / 100));
@@ -146,7 +150,8 @@ function render() {
   const c = document.createElement('canvas');
   c.width = w; c.height = h;
   const ctx = c.getContext('2d');
-  const type = $('format').value;
+  const wa = $('wa').checked;
+  const type = wa ? 'image/jpeg' : $('format').value;
   if (type === 'image/jpeg') { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h); }
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(img, 0, 0, w, h);
@@ -162,7 +167,7 @@ function render() {
     $('sSave').textContent = pct >= 0 ? pct + '%' : '+' + (-pct) + '%';
     $('sav').className = pct >= 0 ? 'good' : '';
     $('save').disabled = false;
-  }, type, +$('quality').value / 100);
+  }, type, (wa ? 80 : +$('quality').value) / 100);
 }
 
 $('preset').onchange = () => {
@@ -170,6 +175,7 @@ $('preset').onchange = () => {
   schedule();
 };
 $('width').oninput = schedule;
+$('wa').onchange = () => { $('iopts').style.display = $('wa').checked ? 'none' : 'block'; schedule(); };
 $('format').onchange = schedule;
 $('quality').oninput = () => { $('qv').textContent = $('quality').value; schedule(); };
 
@@ -206,6 +212,10 @@ async function initFF() {
 }
 
 function vArgs(inName, out, extra = []) {
+  if ($('vwa').checked) {
+    const vb = vduration ? Math.min(2500000, Math.max(150000, Math.floor(15.5 * 8388608 / vduration - 96000))) : 1200000;
+    return [...extra, '-i', inName, '-vf', "scale=-2:'min(720,ih)',fps=30", '-c:v', 'libx264', '-preset', 'veryfast', '-profile:v', 'main', '-level', '3.1', '-pix_fmt', 'yuv420p', '-b:v', String(vb), '-maxrate', String(Math.round(vb * 1.3)), '-bufsize', String(vb * 2), '-movflags', '+faststart', '-c:a', 'aac', '-b:a', '96k', '-ac', '2', out];
+  }
   const q = +$('vq').value, h = +$('vres').value, webm = $('vfmt').value === 'webm';
   const vf = h ? ['-vf', `scale=-2:'min(${h},ih)'`] : ['-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2'];
   const crf = Math.round(51 - q * 0.33);
@@ -252,7 +262,7 @@ async function vEstimate() {
   try {
     status('Estimating output size from a short sample…');
     const { fetchFile } = FFmpegUtil;
-    const ext = $('vfmt').value;
+    const ext = $('vwa').checked ? 'mp4' : $('vfmt').value;
     await ff.writeFile('in_est', await fetchFile(vfile));
     const T = 3;
     await ff.exec(vArgs('in_est', 'est.' + ext, ['-t', String(T)]));
@@ -275,7 +285,7 @@ async function vCompress() {
   if (busy) return;
   busy = 'full'; clearTimeout(vTimer); vJob++;
   $('vsave').disabled = true; $('vprog').style.display = 'block'; $('vprog').value = 0;
-  const ext = $('vfmt').value;
+  const ext = $('vwa').checked ? 'mp4' : $('vfmt').value;
   try {
     status('Compressing… keep this tab open.');
     const { fetchFile } = FFmpegUtil;
@@ -298,6 +308,7 @@ async function vCompress() {
 }
 
 $('vres').onchange = $('vfmt').onchange = vSchedule;
+$('vwa').onchange = () => { $('vopts').style.display = $('vwa').checked ? 'none' : 'grid'; vSchedule(); };
 $('vq').oninput = () => { $('vqv').textContent = $('vq').value; vSchedule(); };
 $('vsave').onclick = vCompress;
 
