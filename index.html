@@ -547,15 +547,27 @@ async function vCompressFast() {
     const outs = [];
     for (let i = 0; i < p.parts; i++) {
       const input = new mb.Input({ source: new mb.BlobSource(vfile), formats: mb.ALL_FORMATS });
-      const output = new mb.Output({ format: webm ? new mb.WebMOutputFormat() : new mb.Mp4OutputFormat(), target: new mb.BufferTarget() });
+      let output;
       const video = { width: p.W, height: p.H, fit: 'fill', codec: webm ? 'vp9' : 'avc', hardwareAcceleration: 'prefer-hardware',
         quality: new mb.Quality({ bitrate: p.vb, bitrateMode: 'variable' }) };
       if (vInfo.fps > p.fps + 0.5) video.frameRate = p.fps;
       const audio = { codec: webm ? 'opus' : 'aac', numberOfChannels: p.ch, quality: new mb.Quality({ bitrate: p.ab }) };
-      const opts = { input, output, video, audio };
-      if (p.parts > 1) opts.trim = { start: i * p.seg, end: Math.min(vduration, (i + 1) * p.seg) };
-      const conv = await mb.Conversion.init(opts);
-      if (!conv.isValid || conv.discardedTracks.some(d => d.track.type === 'video' || d.track.type === 'audio')) throw new Error('fast engine unsupported');
+      const trim = p.parts > 1 ? { start: i * p.seg, end: Math.min(vduration, (i + 1) * p.seg) } : undefined;
+      const variants = [
+        [video, audio],
+        [{ ...video, hardwareAcceleration: 'no-preference' }, audio],
+        [{ ...video, hardwareAcceleration: 'no-preference', frameRate: undefined }, { codec: audio.codec }],
+        [{ ...video, hardwareAcceleration: 'no-preference', frameRate: undefined }, { discard: true }]
+      ];
+      let conv, why = '';
+      for (const [v, a] of variants) {
+        const o = new mb.Output({ format: webm ? new mb.WebMOutputFormat() : new mb.Mp4OutputFormat(), target: new mb.BufferTarget() });
+        const c = await mb.Conversion.init({ input, output: o, video: v, audio: a, ...(trim ? { trim } : {}) });
+        const bad = c.discardedTracks.filter(d => d.track.type === 'video' || (d.track.type === 'audio' && !a.discard));
+        if (c.isValid && !bad.length) { conv = c; output = o; break; }
+        why = bad.map(d => d.track.type + ':' + d.reason).join(', ') || 'invalid';
+      }
+      if (!conv) throw new Error('fast engine unsupported (' + why + ')');
       conv.onProgress = pr => {
         const all = (i + pr) / p.parts;
         $('vprog').value = all;
