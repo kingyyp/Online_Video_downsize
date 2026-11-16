@@ -176,7 +176,7 @@ $('quality').oninput = () => { $('qv').textContent = $('quality').value; schedul
 /* ---------- Video (ffmpeg.wasm) ---------- */
 let ff, ffReady, vfile, vduration = 0, vTimer, vJob = 0, busy = false, logBuf = '';
 const FF = 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/';
-const CORE = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/';
+const CORE = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm/';
 const loadScript = src => new Promise((res, rej) => {
   const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => rej(new Error('Failed to load ' + src));
   document.head.appendChild(s);
@@ -248,6 +248,7 @@ async function vEstimate() {
   if (busy) return vSchedule();
   const my = ++vJob;
   busy = 'est';
+  $('vprog').removeAttribute('value'); $('vprog').style.display = 'block';
   try {
     status('Estimating output size from a short sample…');
     const { fetchFile } = FFmpegUtil;
@@ -267,7 +268,7 @@ async function vEstimate() {
     status('Estimate is approximate; actual size may differ.');
     $('vsave').disabled = false;
   } catch (e) { status('Estimate failed: ' + e.message); $('vsave').disabled = false; }
-  finally { busy = false; }
+  finally { busy = false; $('vprog').style.display = 'none'; }
 }
 
 async function vCompress() {
