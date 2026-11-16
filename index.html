@@ -1,6 +1,7 @@
 ﻿<!DOCTYPE html>
 <html lang="en">
 <head>
+<script type="importmap">{"imports":{"mediabunny":"https://cdn.jsdelivr.net/npm/mediabunny@1.66.0/dist/bundles/mediabunny.mjs"}}</script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Media Compressor</title>
@@ -362,7 +363,7 @@ function vArgs(inName, out, extra = []) {
   return [...extra, '-i', inName, ...vf, ...codec, out];
 }
 
-async function loadVideo(f) {
+async function loadVideoFF(f) {
   vfile = f; file = null;
   applyMeta(f, {});
   $('app').style.display = 'none';
@@ -393,7 +394,7 @@ function vSchedule() {
   vTimer = setTimeout(vEstimate, 500);
 }
 
-async function vEstimate() {
+async function vEstimateFF() {
   if (busy) return vSchedule();
   const my = ++vJob;
   busy = 'est';
@@ -420,13 +421,14 @@ async function vEstimate() {
   finally { busy = false; $('vprog').style.display = 'none'; }
 }
 
-async function vCompress() {
+async function vCompressFF() {
   if (busy) return;
   busy = 'full'; clearTimeout(vTimer); vJob++;
   $('vsave').disabled = true; $('vprog').style.display = 'block'; $('vprog').value = 0;
   const ext = $('vwa').checked ? 'mp4' : $('vfmt').value;
   try {
     status('Compressing… keep this tab open.');
+    await initFF();
     const { fetchFile } = FFmpegUtil;
     await ff.writeFile('in_full', await fetchFile(vfile));
     const code = await ff.exec(vArgs('in_full', 'out.' + ext));
@@ -446,6 +448,137 @@ async function vCompress() {
   finally { busy = false; $('vprog').style.display = 'none'; $('vsave').disabled = false; }
 }
 
+/* ---------- Fast engine: WebCodecs via Mediabunny (hardware accelerated, streams large files) ---------- */
+let engine = 'ff', M = null, vInfo = {};
+async function loadMB() {
+  if (M) return M;
+  const mb = await import('mediabunny');
+  if (!(await mb.canEncodeAudio('aac'))) {
+    const a = await import('https://cdn.jsdelivr.net/npm/@mediabunny/aac-encoder@1.66.0/dist/bundles/mediabunny-aac-encoder.mjs');
+    a.registerAacEncoder();
+  }
+  return (M = mb);
+}
+
+function tagsToMeta(tags) {
+  const raw = (tags && tags.raw) || {}, r = {};
+  const cd = String(raw['com.apple.quicktime.creationdate'] || '').match(/(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)/);
+  if (cd) { r.date = `${cd[1]}-${cd[2]}-${cd[3]}`; r.time = cd[4] + cd[5]; }
+  else if (tags && tags.creationTime) {
+    const d = new Date(tags.creationTime);
+    if (!isNaN(d) && d.getFullYear() > 1990) { r.date = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`; r.time = p2(d.getHours()) + p2(d.getMinutes()); }
+  }
+  const loc = String(raw['com.apple.quicktime.location.ISO6709'] || raw.location || '').match(/([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)/);
+  if (loc) { r.lat = +loc[1]; r.lon = +loc[2]; }
+  return r;
+}
+
+async function loadFast(f) {
+  const mb = await loadMB();
+  const input = new mb.Input({ source: new mb.BlobSource(f), formats: mb.ALL_FORMATS });
+  const vt = await input.getPrimaryVideoTrack();
+  if (!vt || !(await vt.canDecode()) || !(await mb.canEncodeVideo('avc'))) throw new Error('fast engine unsupported');
+  vduration = await input.computeDuration();
+  let fps = 30;
+  try { fps = (await vt.computePacketStats(200)).averagePacketRate || 30; } catch (e) {}
+  vInfo = { w: await vt.getDisplayWidth(), h: await vt.getDisplayHeight(), fps };
+  $('vOrigD').textContent = `${vInfo.w}×${vInfo.h} · ${vduration.toFixed(1)}s`;
+  applyMeta(f, tagsToMeta(await input.getMetadataTags()));
+  if (input.dispose) input.dispose();
+}
+
+function vParams() {
+  const dur = vduration || 1, wa = $('vwa').checked, q = +$('vq').value;
+  let H, vb, ab, ch, warn = '';
+  if (wa) {
+    ab = dur > 300 ? 48000 : 96000; ch = ab <= 48000 ? 1 : 2;
+    vb = Math.min(2500000, Math.floor(15.5 * 8388608 * 0.95 / dur - ab));
+    if (vb < 150000) warn = 'This video is very long, so WhatsApp quality will be low. Consider splitting it.';
+    vb = Math.max(60000, vb);
+    H = vb < 200000 ? 360 : vb < 700000 ? 480 : 720;
+  } else {
+    H = +$('vres').value || vInfo.h; ab = q < 40 ? 64000 : 128000; ch = 2;
+  }
+  H = Math.min(H, vInfo.h); H -= H % 2;
+  const W = Math.round(vInfo.w * H / vInfo.h);
+  const fps = Math.min(vInfo.fps, 30);
+  if (!wa) vb = Math.round(W * H * fps * (0.02 + q / 100 * 0.10));
+  return { H, W, vb, ab, ch, warn, wa, size: Math.round((vb + ab) * dur / 8 * 1.03) };
+}
+
+function showSizes(est) {
+  const pct = Math.round((1 - est / vfile.size) * 100);
+  $('vSave').textContent = pct >= 0 ? pct + '%' : '+' + (-pct) + '%';
+  $('vsav').className = pct >= 0 ? 'good' : '';
+}
+
+function vEstimateFast() {
+  const p = vParams();
+  $('vOut').textContent = '≈ ' + fmt(p.size);
+  $('vOutD').textContent = `${p.W}×${p.H}`;
+  showSizes(p.size);
+  status(p.warn || 'Estimate is approximate; actual size may differ.');
+  $('vsave').disabled = false;
+}
+
+async function vCompressFast() {
+  busy = 'full'; clearTimeout(vTimer); vJob++;
+  $('vsave').disabled = true; $('vprog').style.display = 'block'; $('vprog').value = 0;
+  const p = vParams(), webm = !p.wa && $('vfmt').value === 'webm', ext = webm ? 'webm' : 'mp4';
+  const t0 = performance.now();
+  try {
+    status('Compressing… keep this tab open.');
+    const mb = await loadMB();
+    const input = new mb.Input({ source: new mb.BlobSource(vfile), formats: mb.ALL_FORMATS });
+    const output = new mb.Output({ format: webm ? new mb.WebMOutputFormat() : new mb.Mp4OutputFormat(), target: new mb.BufferTarget() });
+    const video = { height: p.H, codec: webm ? 'vp9' : 'avc', hardwareAcceleration: 'prefer-hardware',
+      quality: new mb.Quality({ bitrate: p.vb, bitrateMode: p.wa ? 'constant' : 'variable' }) };
+    if (vInfo.fps > 30.5) video.frameRate = 30;
+    const audio = { codec: webm ? 'opus' : 'aac', numberOfChannels: p.ch, quality: new mb.Quality({ bitrate: p.ab }) };
+    const conv = await mb.Conversion.init({ input, output, video, audio });
+    if (!conv.isValid || conv.discardedTracks.some(d => d.track.type === 'video' || d.track.type === 'audio')) throw new Error('fast engine unsupported');
+    conv.onProgress = pr => {
+      $('vprog').value = pr;
+      const el = (performance.now() - t0) / 1000, speed = pr > 0.01 ? pr * vduration / el : 0;
+      const eta = pr > 0.01 ? Math.round(el * (1 - pr) / pr) : null;
+      status(`Compressing… ${Math.round(pr * 100)}%` + (speed ? ` · speed ${speed.toFixed(1)}x` : '') +
+        (eta !== null ? ` · ~${eta >= 60 ? Math.floor(eta / 60) + 'm ' : ''}${eta % 60}s left` : ''));
+    };
+    await conv.execute();
+    const b = new Blob([output.target.buffer], { type: webm ? 'video/webm' : 'video/mp4' });
+    finishVideo(b, ext);
+  } catch (e) {
+    console.warn(e);
+    status('Fast engine unavailable for this file, switching to the slower compatible engine…');
+    engine = 'ff'; busy = false;
+    return vCompressFF();
+  }
+  busy = false; $('vprog').style.display = 'none'; $('vsave').disabled = false;
+}
+
+function finishVideo(b, ext) {
+  const url = URL.createObjectURL(b);
+  $('vprev').src = url; $('vprev').style.display = 'block';
+  $('vOut').textContent = fmt(b.size);
+  showSizes(b.size);
+  const a = document.createElement('a');
+  a.href = url; a.download = nameBase() + '.' + ext; a.click();
+  status('Done — final size ' + fmt(b.size) + '.' + (b.size > 16 * 1048576 ? ' Note: WhatsApp limits videos to 16 MB; tick "Optimize for WhatsApp" or lower the resolution/quality.' : ''));
+}
+
+async function loadVideo(f) {
+  vfile = f; file = null;
+  applyMeta(f, {});
+  $('app').style.display = 'none';
+  $('vapp').style.display = 'block';
+  $('vOrig').textContent = fmt(f.size);
+  $('vOut').textContent = '…'; $('vsave').disabled = true; $('vprev').style.display = 'none';
+  status('Reading video…');
+  try { await loadFast(f); engine = 'fast'; vSchedule(); }
+  catch (e) { console.warn(e); engine = 'ff'; await loadVideoFF(f); }
+}
+const vEstimate = () => engine === 'fast' ? vEstimateFast() : vEstimateFF();
+const vCompress = () => { if (!busy) return engine === 'fast' ? vCompressFast() : vCompressFF(); };
 $('vres').onchange = $('vfmt').onchange = vSchedule;
 $('vwa').onchange = () => { $('vopts').style.display = $('vwa').checked ? 'none' : 'grid'; vSchedule(); };
 $('vq').oninput = () => { $('vqv').textContent = $('vq').value; vSchedule(); };
