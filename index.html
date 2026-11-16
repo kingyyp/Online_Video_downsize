@@ -504,8 +504,9 @@ function vParams() {
   } else {
     H = +$('vres').value || vInfo.h; ab = q < 40 ? 64000 : 128000; ch = 2;
   }
-  H = Math.min(H, vInfo.h); H -= H % 2;
-  const W = Math.round(vInfo.w * H / vInfo.h);
+  H = Math.min(H, Math.min(vInfo.w, vInfo.h));
+  const sc = H / Math.min(vInfo.w, vInfo.h), ev = n => Math.max(2, Math.round(n / 2) * 2);
+  const W = ev(vInfo.w * sc); H = ev(vInfo.h * sc);
   const fps = Math.min(vInfo.fps, 30);
   if (!wa) vb = Math.round(W * H * fps * (0.02 + q / 100 * 0.10));
   return { H, W, vb, ab, ch, warn, wa, parts, seg: dur, perFile: Math.round((vb + ab) * dur / 8 * 1.03), size: Math.round((vb + ab) * total / 8 * 1.03) };
@@ -538,7 +539,7 @@ async function vCompressFast() {
     for (let i = 0; i < p.parts; i++) {
       const input = new mb.Input({ source: new mb.BlobSource(vfile), formats: mb.ALL_FORMATS });
       const output = new mb.Output({ format: webm ? new mb.WebMOutputFormat() : new mb.Mp4OutputFormat(), target: new mb.BufferTarget() });
-      const video = { height: p.H, codec: webm ? 'vp9' : 'avc', hardwareAcceleration: 'prefer-hardware',
+      const video = { width: p.W, height: p.H, fit: 'fill', codec: webm ? 'vp9' : 'avc', hardwareAcceleration: 'prefer-hardware',
         quality: new mb.Quality({ bitrate: p.vb, bitrateMode: p.wa ? 'constant' : 'variable' }) };
       if (vInfo.fps > 30.5) video.frameRate = 30;
       const audio = { codec: webm ? 'opus' : 'aac', numberOfChannels: p.ch, quality: new mb.Quality({ bitrate: p.ab }) };
@@ -561,6 +562,11 @@ async function vCompressFast() {
     else await finishParts(outs, ext);
   } catch (e) {
     console.warn(e);
+    if (vfile.size > 300 * 1048576 || !/unsupported/.test(String(e && e.message))) {
+      status('Error: ' + ((e && e.message) || e) + ' — try a lower resolution/quality, or a different browser (Chrome or Edge recommended).');
+      busy = false; $('vprog').style.display = 'none'; $('vsave').disabled = false;
+      return;
+    }
     status('Fast engine unavailable for this file, switching to the slower compatible engine (no splitting)…');
     engine = 'ff'; busy = false;
     return vCompressFF();
