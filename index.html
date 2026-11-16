@@ -48,7 +48,7 @@
       <div><label>Quality: <span id="vqv">60</span>%</label>
         <input id="vq" type="range" min="1" max="100" value="60"></div>
       <div><label>Format</label>
-        <select id="vfmt"><option value="mp4">MP4 (H.264)</option><option value="webm">WebM (VP9, slower)</option></select></div>
+        <select id="vfmt"><option value="mp4">MP4 (H.264) - best for WhatsApp/iPhone</option><option value="webm">WebM (VP9, slower, not WhatsApp-friendly)</option></select></div>
     </div>
     <video id="vprev" controls style="max-width:100%;max-height:300px;margin-top:12px;display:none"></video>
     <div id="vstatus" style="margin-top:12px;font-size:14px;color:#374151"></div>
@@ -292,7 +292,7 @@ async function vCompress() {
     $('vSave').textContent = pct >= 0 ? pct + '%' : '+' + (-pct) + '%';
     const a = document.createElement('a');
     a.href = url; a.download = vfile.name.replace(/\.[^.]+$/, '') + '-compressed.' + ext; a.click();
-    status('Done — final size ' + fmt(b.size) + '.');
+    status('Done — final size ' + fmt(b.size) + '.' + (b.size > 16 * 1048576 ? ' Note: WhatsApp limits videos to 16 MB; lower the resolution or quality to share as video.' : ''));
   } catch (e) { status('Error: ' + e.message); }
   finally { busy = false; $('vprog').style.display = 'none'; $('vsave').disabled = false; }
 }
