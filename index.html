@@ -35,6 +35,14 @@
   <div id="drop">Drop an image here or click to choose<br><small>JPEG, PNG, WebP â€” processed locally in your browser</small>
     <input id="file" type="file" accept="image/*,video/*,.mov,.mkv,.avi,.wmv,.flv,.m4v,.3gp,.mts,.ts" hidden></div>
 
+  <div id="info" class="panel" style="display:none;margin-top:20px">
+    <div><b>Original:</b> <span id="iName"></span></div>
+    <div><b>Captured:</b> <span id="iDate">-</span> &nbsp; <b>Location:</b> <span id="iLoc">-</span></div>
+    <label><input type="checkbox" id="iGeo" checked> Look up place name from GPS <small>(sends coordinates to OpenStreetMap)</small></label>
+    <label>Save as <small>(without extension; edit freely)</small></label>
+    <input id="iNew" type="text" style="width:100%;padding:8px;border:1px solid #d1d5db;border-radius:6px">
+  </div>
+
   <div id="vapp" style="display:none;margin-top:20px" class="panel">
     <div class="stats">
       <div>Original<b id="vOrig">-</b><span id="vOrigD"></span></div>
@@ -110,10 +118,12 @@ $('file').onchange = e => load(e.target.files[0]);
 const VIDEO_EXT = /\.(mov|mp4|m4v|mkv|avi|wmv|flv|webm|3gp|mts|ts|mpg|mpeg)$/i;
 function load(f) {
   if (!f) return;
+  nameDirty = false;
   if (f.type.startsWith('video/') || VIDEO_EXT.test(f.name)) return loadVideo(f);
   if (!f.type.startsWith('image/')) return alert('Please choose an image or video file.');
   $('vapp').style.display = 'none';
   file = f;
+  applyMeta(f, {}); readImageMeta(f).then(m => { if (file === f) applyMeta(f, m); });
   const i = new Image();
   i.onload = () => {
     img = i;
@@ -179,6 +189,133 @@ $('wa').onchange = () => { $('iopts').style.display = $('wa').checked ? 'none' :
 $('format').onchange = schedule;
 $('quality').oninput = () => { $('qv').textContent = $('quality').value; schedule(); };
 
+/* ---------- Metadata & smart file name ---------- */
+let meta = {}, nameDirty = false, metaJob = 0, srcFile = null;
+const p2 = n => String(n).padStart(2, '0');
+
+function readTiff(v, t) {
+  const le = v.getUint16(t) === 0x4949;
+  const g16 = p => v.getUint16(p, le), g32 = p => v.getUint32(p, le);
+  const ifd = off => {
+    const out = {}, n = g16(off);
+    for (let i = 0; i < n; i++) {
+      const e = off + 2 + i * 12;
+      out[g16(e)] = { type: g16(e + 2), count: g32(e + 4), e };
+    }
+    return out;
+  };
+  const ascii = en => {
+    const p = en.count > 4 ? t + g32(en.e + 8) : en.e + 8;
+    let s = ''; for (let i = 0; i < en.count - 1; i++) s += String.fromCharCode(v.getUint8(p + i)); return s;
+  };
+  const rats = en => {
+    const p = t + g32(en.e + 8), r = [];
+    for (let i = 0; i < en.count; i++) r.push(g32(p + i * 8) / (g32(p + i * 8 + 4) || 1));
+    return r;
+  };
+  const res = {};
+  const i0 = ifd(t + g32(t + 4));
+  if (i0[0x8769]) {
+    const ex = ifd(t + g32(i0[0x8769].e + 8));
+    const d = ex[0x9003] || ex[0x9004] || i0[0x0132];
+    if (d) res.exifDate = ascii(d);
+  } else if (i0[0x0132]) res.exifDate = ascii(i0[0x0132]);
+  if (i0[0x8825]) {
+    const gp = ifd(t + g32(i0[0x8825].e + 8));
+    if (gp[2] && gp[4]) {
+      const la = rats(gp[2]), lo = rats(gp[4]);
+      let lat = la[0] + la[1] / 60 + la[2] / 3600, lon = lo[0] + lo[1] / 60 + lo[2] / 3600;
+      if (gp[1] && ascii(gp[1]) === 'S') lat = -lat;
+      if (gp[3] && ascii(gp[3]) === 'W') lon = -lon;
+      if (isFinite(lat) && isFinite(lon) && (lat || lon)) { res.lat = lat; res.lon = lon; }
+    }
+  }
+  return res;
+}
+
+async function readImageMeta(f) {
+  try {
+    const v = new DataView(await f.slice(0, 262144).arrayBuffer());
+    if (v.getUint16(0) !== 0xFFD8) return {};
+    let o = 2;
+    while (o < v.byteLength - 10) {
+      const m = v.getUint16(o), len = v.getUint16(o + 2);
+      if (m === 0xFFE1 && v.getUint32(o + 4) === 0x45786966) {
+        const r = readTiff(v, o + 10);
+        const d = r.exifDate && r.exifDate.match(/(\d{4}):(\d\d):(\d\d) (\d\d):(\d\d)/);
+        if (d) r.date = `${d[1]}-${d[2]}-${d[3]}`, r.time = d[4] + d[5];
+        return r;
+      }
+      if ((m & 0xFF00) !== 0xFF00) break;
+      o += 2 + len;
+    }
+  } catch (e) {}
+  return {};
+}
+
+function parseVideoMeta(log) {
+  const r = {};
+  let m = log.match(/com\.apple\.quicktime\.creationdate\s*:\s*(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)/);
+  if (m) { r.date = `${m[1]}-${m[2]}-${m[3]}`; r.time = m[4] + m[5]; }
+  else if ((m = log.match(/creation_time\s*:\s*(\S+)/))) {
+    const d = new Date(m[1]);
+    if (!isNaN(d) && d.getFullYear() > 1990) { r.date = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`; r.time = p2(d.getHours()) + p2(d.getMinutes()); }
+  }
+  m = log.match(/(?:ISO6709|location)[^:\n]*:\s*([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)/);
+  if (m) { r.lat = +m[1]; r.lon = +m[2]; }
+  return r;
+}
+
+async function reverseGeocode(lat, lon) {
+  try {
+    const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=12&accept-language=en&lat=${lat}&lon=${lon}`);
+    const a = (await res.json()).address || {};
+    const place = a.suburb || a.city || a.town || a.village || a.municipality || a.county || a.state;
+    return [place, a.country].filter(Boolean).join(', ');
+  } catch (e) { return ''; }
+}
+
+const clean = s => s.replace(/[\\/:*?"<>|]/g, '').replace(/[,\s]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+const baseOf = n => n.replace(/\.[^.]+$/, '');
+
+function nameBase() {
+  const v = $('iNew').value.trim().replace(/[\\/:*?"<>|]/g, '');
+  return v || baseOf(srcFile.name) + '-compressed';
+}
+
+function buildName() {
+  const parts = [];
+  if (meta.date) parts.push(meta.date + (meta.time ? '_' + meta.time : ''));
+  if (meta.place) parts.push(clean(meta.place));
+  return parts.length ? parts.join('_') : baseOf(srcFile.name) + '-compressed';
+}
+
+function refreshInfo() {
+  $('iDate').textContent = meta.date ? meta.date + (meta.time ? ' ' + meta.time.slice(0, 2) + ':' + meta.time.slice(2) : '') : 'not found';
+  $('iLoc').textContent = meta.place || (meta.lat !== undefined ? meta.lat.toFixed(4) + ', ' + meta.lon.toFixed(4) : 'not found');
+  if (!nameDirty) $('iNew').value = buildName();
+}
+
+async function applyMeta(f, m) {
+  const my = ++metaJob;
+  srcFile = f; meta = { ...m };
+  if (!meta.date && f.lastModified) {
+    const d = new Date(f.lastModified);
+    meta.date = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`; meta.dateFromFile = true;
+  }
+  $('info').style.display = 'block';
+  $('iName').textContent = f.name;
+  refreshInfo();
+  if (meta.lat !== undefined && $('iGeo').checked) {
+    $('iLoc').textContent = 'looking up…';
+    const place = await reverseGeocode(meta.lat, meta.lon);
+    if (my !== metaJob) return;
+    meta.place = place; refreshInfo();
+  }
+}
+$('iNew').oninput = () => { nameDirty = true; };
+$('iGeo').onchange = () => { nameDirty = false; applyMeta(srcFile, meta.lat !== undefined ? { date: meta.dateFromFile ? undefined : meta.date, time: meta.time, lat: meta.lat, lon: meta.lon } : {}); };
+
 /* ---------- Video (ffmpeg.wasm) ---------- */
 let ff, ffReady, vfile, vduration = 0, vTimer, vJob = 0, busy = false, logBuf = '';
 const FF = 'https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/umd/';
@@ -227,6 +364,7 @@ function vArgs(inName, out, extra = []) {
 
 async function loadVideo(f) {
   vfile = f; file = null;
+  applyMeta(f, {});
   $('app').style.display = 'none';
   $('vapp').style.display = 'block';
   $('vOrig').textContent = fmt(f.size);
@@ -242,6 +380,7 @@ async function loadVideo(f) {
     vduration = m ? (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]) : 0;
     const r = logBuf.match(/Video:.*?, (\d{2,5})x(\d{2,5})/);
     $('vOrigD').textContent = (r ? r[1] + '×' + r[2] + ' · ' : '') + (vduration ? vduration.toFixed(1) + 's' : '');
+    applyMeta(f, parseVideoMeta(logBuf));
     await ff.deleteFile('in_probe').catch(() => {});
     vSchedule();
   } catch (e) { status('Error: ' + e.message); }
@@ -301,7 +440,7 @@ async function vCompress() {
     const pct = Math.round((1 - b.size / vfile.size) * 100);
     $('vSave').textContent = pct >= 0 ? pct + '%' : '+' + (-pct) + '%';
     const a = document.createElement('a');
-    a.href = url; a.download = vfile.name.replace(/\.[^.]+$/, '') + '-compressed.' + ext; a.click();
+    a.href = url; a.download = nameBase() + '.' + ext; a.click();
     status('Done — final size ' + fmt(b.size) + '.' + (b.size > 16 * 1048576 ? ' Note: WhatsApp limits videos to 16 MB; lower the resolution or quality to share as video.' : ''));
   } catch (e) { status('Error: ' + e.message); }
   finally { busy = false; $('vprog').style.display = 'none'; $('vsave').disabled = false; }
@@ -317,7 +456,7 @@ $('save').onclick = () => {
   const ext = { 'image/jpeg': 'jpg', 'image/webp': 'webp', 'image/png': 'png' }[blob.type] || 'img';
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = file.name.replace(/\.[^.]+$/, '') + '-compressed.' + ext;
+  a.download = nameBase() + '.' + ext;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 };
