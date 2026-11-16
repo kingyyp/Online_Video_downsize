@@ -494,22 +494,31 @@ function vParams() {
   const splitSec = wa ? +$('vsplit').value : 0;
   const dur = splitSec ? Math.min(splitSec, total) : total;
   const parts = Math.max(1, Math.ceil(total / dur - 0.01));
-  let H, vb, ab, ch, warn = '';
+  let H, vb, ab, ch, warn = '', wfps = 0;
   if (wa) {
-    ab = dur > 300 ? 48000 : 96000; ch = ab <= 48000 ? 1 : 2;
-    vb = Math.min(2500000, Math.floor(15.5 * 8388608 * 0.95 / dur - ab));
+    ab = dur > 600 ? 32000 : dur > 300 ? 48000 : 80000; ch = ab <= 48000 ? 1 : 2;
+    vb = Math.min(2500000, Math.floor(15.5 * 8388608 * 0.96 / dur - ab));
     if (vb < 150000) warn = 'This video is very long, so WhatsApp quality will be low. Consider splitting it.';
     vb = Math.max(60000, vb);
-    H = vb < 200000 ? 360 : vb < 700000 ? 480 : 720;
+    // Spend bits on fewer pixels/frames so each one looks cleaner
+    const sh = Math.min(vInfo.w, vInfo.h), srcFps = Math.min(vInfo.fps || 30, 30);
+    outer: for (const f of [30, 24, 15]) {
+      if (f > srcFps + 0.5 && f !== 15) continue;
+      for (const h of [720, 540, 480, 360, 270]) {
+        const hh = Math.min(h, sh), asp = Math.max(vInfo.w, vInfo.h) / sh;
+        if (vb / (hh * hh * asp * Math.min(f, srcFps)) >= 0.08) { H = h; wfps = Math.min(f, srcFps); break outer; }
+      }
+    }
+    if (!H) { H = 270; wfps = Math.min(15, srcFps); }
   } else {
     H = +$('vres').value || vInfo.h; ab = q < 40 ? 64000 : 128000; ch = 2;
   }
   H = Math.min(H, Math.min(vInfo.w, vInfo.h));
   const sc = H / Math.min(vInfo.w, vInfo.h), ev = n => Math.max(2, Math.round(n / 2) * 2);
   const W = ev(vInfo.w * sc); H = ev(vInfo.h * sc);
-  const fps = Math.min(vInfo.fps, 30);
+  const fps = wa ? wfps : Math.min(vInfo.fps, 30);
   if (!wa) vb = Math.round(W * H * fps * (0.02 + q / 100 * 0.10));
-  return { H, W, vb, ab, ch, warn, wa, parts, seg: dur, perFile: Math.round((vb + ab) * dur / 8 * 1.03), size: Math.round((vb + ab) * total / 8 * 1.03) };
+  return { fps, H, W, vb, ab, ch, warn, wa, parts, seg: dur, perFile: Math.round((vb + ab) * dur / 8 * 1.03), size: Math.round((vb + ab) * total / 8 * 1.03) };
 }
 
 function showSizes(est) {
@@ -540,8 +549,8 @@ async function vCompressFast() {
       const input = new mb.Input({ source: new mb.BlobSource(vfile), formats: mb.ALL_FORMATS });
       const output = new mb.Output({ format: webm ? new mb.WebMOutputFormat() : new mb.Mp4OutputFormat(), target: new mb.BufferTarget() });
       const video = { width: p.W, height: p.H, fit: 'fill', codec: webm ? 'vp9' : 'avc', hardwareAcceleration: 'prefer-hardware',
-        quality: new mb.Quality({ bitrate: p.vb, bitrateMode: p.wa ? 'constant' : 'variable' }) };
-      if (vInfo.fps > 30.5) video.frameRate = 30;
+        quality: new mb.Quality({ bitrate: p.vb, bitrateMode: 'variable' }) };
+      if (vInfo.fps > p.fps + 0.5) video.frameRate = p.fps;
       const audio = { codec: webm ? 'opus' : 'aac', numberOfChannels: p.ch, quality: new mb.Quality({ bitrate: p.ab }) };
       const opts = { input, output, video, audio };
       if (p.parts > 1) opts.trim = { start: i * p.seg, end: Math.min(vduration, (i + 1) * p.seg) };
