@@ -53,6 +53,8 @@
     <label style="font-weight:600"><input type="checkbox" id="vwa"> Optimize for WhatsApp <small>(MP4 H.264/AAC, max 720p, 30fps, fits under 16 MB)</small></label>
     <div id="vsplitBox" style="display:none;margin:8px 0"><label>Split into parts <small>(each part gets its own 16 MB budget, so shorter parts = better quality)</small></label>
       <select id="vsplit"><option value="0">Don't split</option><option value="900">15 min parts</option><option value="600">10 min parts</option><option value="300" selected>5 min parts</option><option value="180">3 min parts</option><option value="120">2 min parts</option><option value="60">1 min parts</option></select></div>
+    <div style="margin:8px 0"><label>Color correction <small id="vhdr">(use if the output looks darker or more saturated than the original, common with iPhone HDR video)</small></label>
+      <select id="vcolor"><option value="0">Off</option><option value="1">Light</option><option value="2">Medium</option><option value="3">Strong</option></select></div>
     <div id="vopts" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px">
       <div><label>Resolution</label>
         <select id="vres"><option value="0">Original</option><option value="1080">1080p</option>
@@ -484,6 +486,12 @@ async function loadFast(f) {
   let fps = 30;
   try { fps = (await vt.computePacketStats(200)).averagePacketRate || 30; } catch (e) {}
   vInfo = { w: await vt.getDisplayWidth(), h: await vt.getDisplayHeight(), fps };
+  try {
+    const cs = await vt.getColorSpace();
+    vInfo.hdr = !!cs && (cs.transfer === 'hlg' || cs.transfer === 'pq' || cs.primaries === 'bt2020');
+  } catch (e) {}
+  $('vcolor').value = vInfo.hdr ? '2' : '0';
+  $('vhdr').textContent = vInfo.hdr ? '(HDR video detected, so Medium is pre-selected to match the original look)' : '(use if the output looks darker or more saturated than the original)';
   $('vOrigD').textContent = `${vInfo.w}×${vInfo.h} · ${vduration.toFixed(1)}s`;
   applyMeta(f, tagsToMeta(await input.getMetadataTags()));
   if (input.dispose) input.dispose();
@@ -551,6 +559,17 @@ async function vCompressFast() {
       const video = { width: p.W, height: p.H, fit: 'fill', codec: webm ? 'vp9' : 'avc', hardwareAcceleration: 'prefer-hardware',
         quality: new mb.Quality({ bitrate: p.vb, bitrateMode: 'variable' }) };
       if (vInfo.fps > p.fps + 0.5) video.frameRate = p.fps;
+      const lvl = +$('vcolor').value;
+      if (lvl) {
+        const filt = ['', 'brightness(1.08) contrast(0.97) saturate(0.95)', 'brightness(1.16) contrast(0.94) saturate(0.88)', 'brightness(1.25) contrast(0.9) saturate(0.8)'][lvl];
+        let cv, cx;
+        video.process = s => {
+          if (!cv) { cv = new OffscreenCanvas(p.W, p.H); cx = cv.getContext('2d'); cx.filter = filt; }
+          s.draw(cx, 0, 0, p.W, p.H);
+          return new mb.VideoSample(cv, { timestamp: s.timestamp, duration: s.duration });
+        };
+        video.processedWidth = p.W; video.processedHeight = p.H;
+      }
       const audio = { codec: webm ? 'opus' : 'aac', numberOfChannels: p.ch, quality: new mb.Quality({ bitrate: p.ab }) };
       const trim = p.parts > 1 ? { start: i * p.seg, end: Math.min(vduration, (i + 1) * p.seg) } : undefined;
       const LIMIT = 15.6 * 1048576;
